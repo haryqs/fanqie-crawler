@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+*.egg
+venv/
+.venv/
+env/
+.env
+*.epub
+*.meta.json
+.DS_Store
+Thumbs.db
+reports/*.json
+_tmp_out/

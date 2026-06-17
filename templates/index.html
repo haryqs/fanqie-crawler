@@ -1,0 +1,529 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<title>番茄小说下载器</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<div class="app">
+  <header class="header">
+    <span class="header-title" id="headerTitle">📚 番茄小说下载器</span>
+    <span class="header-badge" id="alertBadge">0</span>
+  </header>
+
+  <main class="main" id="mainContent">
+
+    <!-- ═══ 搜索页 ═══ -->
+    <div class="page active" id="searchView">
+      <div class="search-hero" id="searchHero">
+        <div class="search-icon">📖</div>
+        <div class="search-title">番茄小说下载器</div>
+        <div class="search-subtitle">搜索你想下载的小说</div>
+      </div>
+      <div class="search-bar-wrap">
+        <input type="search" class="search-bar" id="searchInput" placeholder="输入书名或作者..." autocomplete="off" enterkeyhint="search">
+        <button class="search-btn" id="searchBtn" aria-label="搜索">🔍</button>
+      </div>
+      <div class="search-loading" id="searchLoading">
+        <div class="spinner"></div>
+        <div>正在搜索...</div>
+      </div>
+      <div class="search-empty" id="searchEmpty">
+        <div class="empty-icon">📭</div>
+        <div class="empty-text">未找到相关小说</div>
+      </div>
+      <div id="searchResults"></div>
+    </div>
+
+    <!-- ═══ 下载页 ═══ -->
+    <div class="page" id="downloadView">
+      <div class="download-empty-state active" id="downloadEmpty">
+        <div class="empty-icon">📥</div>
+        <div class="empty-title">暂无下载任务</div>
+        <div class="empty-info">搜索小说并选择后，下载进度将在这里显示</div>
+      </div>
+      <div class="download-card" id="downloadCard">
+        <div class="dl-book-name" id="dlBookName">—</div>
+        <div class="dl-status-text" id="dlStatus">准备中...</div>
+        <div class="progress-wrap">
+          <div class="progress-track">
+            <div class="progress-fill" id="progressFill" style="width:0%"></div>
+          </div>
+          <div class="progress-stats">
+            <span class="progress-pct" id="progressPct">0%</span>
+            <span class="progress-chapter" id="progressChapter">—</span>
+          </div>
+        </div>
+        <div class="dl-details">
+          <div class="dl-detail-item">
+            <div class="dl-detail-label">下载速度</div>
+            <div class="dl-detail-value" id="dlSpeed">—</div>
+          </div>
+          <div class="dl-detail-item">
+            <div class="dl-detail-label">预计剩余</div>
+            <div class="dl-detail-value" id="dlEta">—</div>
+          </div>
+        </div>
+        <div class="alerts-section" id="alertsSection" style="display:none">
+          <div class="alerts-title">⚠️ 反爬虫预警</div>
+          <div id="alertsList"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ═══ 历史页 ═══ -->
+    <div class="page" id="historyView">
+      <div class="history-empty" id="historyEmpty">
+        <div class="empty-icon">📚</div>
+        <div class="empty-text">还没有下载记录</div>
+      </div>
+      <div id="historyList"></div>
+    </div>
+
+  </main>
+
+  <!-- ═══ 底部导航 ═══ -->
+  <nav class="bottom-nav">
+    <button class="nav-item active" data-page="search">
+      <span class="nav-icon">🔍</span>
+      <span class="nav-label">搜索</span>
+    </button>
+    <button class="nav-item" data-page="download">
+      <span class="nav-icon">⬇️</span>
+      <span class="nav-label">下载</span>
+      <span class="nav-badge" id="navBadge"></span>
+    </button>
+    <button class="nav-item" data-page="history">
+      <span class="nav-icon">📂</span>
+      <span class="nav-label">历史</span>
+    </button>
+  </nav>
+
+  <!-- ═══ 确认下载弹窗 ═══ -->
+  <div class="modal-overlay" id="confirmModal">
+    <div class="modal-sheet">
+      <div class="modal-book-name" id="modalBookName"></div>
+      <div class="modal-book-author" id="modalBookAuthor"></div>
+      <div class="modal-book-summary" id="modalBookSummary"></div>
+      <div class="modal-actions">
+        <button class="btn btn-secondary" id="modalCancel">取消</button>
+        <button class="btn btn-primary" id="modalConfirm">确认下载</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ Toast ═══ -->
+<div class="toast" id="toast"></div>
+
+<script>
+(function() {
+  'use strict';
+
+  var $ = function(s) { return document.querySelector(s); };
+  var $$ = function(s) { return document.querySelectorAll(s); };
+
+  var searchInput = $('#searchInput');
+  var searchBtn = $('#searchBtn');
+  var searchHero = $('#searchHero');
+  var searchLoading = $('#searchLoading');
+  var searchEmpty = $('#searchEmpty');
+  var searchResults = $('#searchResults');
+  var downloadEmpty = $('#downloadEmpty');
+  var downloadCard = $('#downloadCard');
+  var progressFill = $('#progressFill');
+  var progressPct = $('#progressPct');
+  var progressChapter = $('#progressChapter');
+  var dlBookName = $('#dlBookName');
+  var dlStatus = $('#dlStatus');
+  var dlSpeed = $('#dlSpeed');
+  var dlEta = $('#dlEta');
+  var alertsSection = $('#alertsSection');
+  var alertsList = $('#alertsList');
+  var historyEmpty = $('#historyEmpty');
+  var historyList = $('#historyList');
+  var confirmModal = $('#confirmModal');
+  var modalBookName = $('#modalBookName');
+  var modalBookAuthor = $('#modalBookAuthor');
+  var modalBookSummary = $('#modalBookSummary');
+  var toast = $('#toast');
+  var navBadge = $('#navBadge');
+  var alertBadge = $('#alertBadge');
+  var headerTitle = $('#headerTitle');
+  var mainContent = $('#mainContent');
+
+  var currentPage = 'search';
+  var selectedBook = null;
+  var pollTimer = null;
+  var alertCount = 0;
+  var downloadStartTime = 0;
+  var lastChapterCount = 0;
+
+  function switchPage(name) {
+    currentPage = name;
+    $$('.page').forEach(function(p) { p.classList.remove('active'); });
+    $$('.nav-item').forEach(function(n) { n.classList.remove('active'); });
+
+    var pageMap = { search: 'searchView', download: 'downloadView', history: 'historyView' };
+    var pageEl = document.getElementById(pageMap[name]);
+    if (pageEl) pageEl.classList.add('active');
+
+    var navItem = document.querySelector('.nav-item[data-page="' + name + '"]');
+    if (navItem) navItem.classList.add('active');
+
+    var titles = { search: '📚 番茄小说下载器', download: '📥 下载进度', history: '📂 下载历史' };
+    headerTitle.textContent = titles[name] || '📚 番茄小说下载器';
+
+    if (name === 'history') loadHistory();
+    if (name === 'download') restoreDownloadState();
+    if (name === 'search') {
+      searchInput.focus();
+    }
+  }
+
+  function showToast(msg, type) {
+    toast.textContent = msg;
+    toast.className = 'toast ' + (type || '');
+    toast.classList.add('visible');
+    clearTimeout(toast._timeout);
+    toast._timeout = setTimeout(function() {
+      toast.classList.remove('visible');
+    }, 2500);
+  }
+
+  function showConfirmModal(book) {
+    selectedBook = book;
+    modalBookName.textContent = book.book_name;
+    modalBookAuthor.textContent = book.author + ' · ' + book.status + ' · ' + formatWordCount(book.word_count);
+    modalBookSummary.textContent = book.abstract || '暂无简介';
+    confirmModal.classList.add('active');
+  }
+
+  function hideConfirmModal() {
+    confirmModal.classList.remove('active');
+    selectedBook = null;
+  }
+
+  function formatWordCount(n) {
+    if (!n) return '未知';
+    if (n >= 10000) return (n / 10000).toFixed(1) + '万字';
+    return n + '字';
+  }
+
+  function formatFileSize(mb) {
+    if (!mb) return '未知';
+    if (mb >= 1024) return (mb / 1024).toFixed(1) + ' GB';
+    return mb.toFixed(1) + ' MB';
+  }
+
+  function formatTime(seconds) {
+    if (seconds < 60) return Math.ceil(seconds) + '秒';
+    if (seconds < 3600) return Math.ceil(seconds / 60) + '分钟';
+    return (seconds / 3600).toFixed(1) + '小时';
+  }
+
+  function timeAgo(dateStr) {
+    if (!dateStr) return '';
+    var then = new Date(dateStr);
+    var now = new Date();
+    var diff = (now - then) / 1000;
+    if (diff < 60) return '刚刚';
+    if (diff < 3600) return Math.floor(diff / 60) + '分钟前';
+    if (diff < 86400) return Math.floor(diff / 3600) + '小时前';
+    if (diff < 604800) return Math.floor(diff / 86400) + '天前';
+    return dateStr.slice(0, 10);
+  }
+
+  /* ── Search ── */
+
+  function doSearch() {
+    var keyword = searchInput.value.trim();
+    if (!keyword) { showToast('请输入书名', 'error'); return; }
+
+    searchLoading.classList.add('active');
+    searchEmpty.classList.remove('active');
+    searchResults.innerHTML = '';
+    searchHero.classList.add('compact');
+
+    fetch('/api/search', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ keyword: keyword })
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      searchLoading.classList.remove('active');
+      var results = data.results || [];
+      if (!results.length) {
+        searchEmpty.classList.add('active');
+        return;
+      }
+      searchEmpty.classList.remove('active');
+      renderSearchResults(results);
+    })
+    .catch(function(err) {
+      searchLoading.classList.remove('active');
+      showToast('搜索失败: ' + err.message, 'error');
+      searchHero.classList.remove('compact');
+    });
+  }
+
+  function renderSearchResults(results) {
+    var html = '';
+    results.forEach(function(b) {
+      var statusClass = b.status === '已完结' ? 'finished' : 'ongoing';
+      html += '<div class="result-card" data-book-id="' + b.book_id + '">';
+      html += '<div class="result-title">' + escapeHtml(b.book_name) + '</div>';
+      html += '<div class="result-meta">';
+      html += '<span class="result-meta-item">' + escapeHtml(b.author) + '</span>';
+      html += '<span class="result-meta-item">' + formatWordCount(b.word_count) + '</span>';
+      if (b.category) html += '<span class="result-meta-item">' + escapeHtml(b.category) + '</span>';
+      html += '<span class="result-status ' + statusClass + '">' + escapeHtml(b.status || '未知') + '</span>';
+      html += '</div>';
+      if (b.abstract) html += '<div class="result-abstract">' + escapeHtml(b.abstract) + '</div>';
+      html += '</div>';
+    });
+    searchResults.innerHTML = html;
+
+    searchResults.querySelectorAll('.result-card').forEach(function(card) {
+      card.addEventListener('click', function() {
+        var bookId = card.dataset.bookId;
+        var book = results.find(function(b) { return b.book_id === bookId; });
+        if (book) showConfirmModal(book);
+      });
+    });
+  }
+
+  /* ── Download ── */
+
+  function startDownload(bookId) {
+    hideConfirmModal();
+
+    fetch('/api/download', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ book_id: bookId, book_name: selectedBook ? selectedBook.book_name : '未知' })
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      var taskId = data.task_id;
+      sessionStorage.setItem('task_id', taskId);
+      sessionStorage.setItem('dl_book_name', selectedBook ? selectedBook.book_name : '');
+      downloadStartTime = Date.now();
+      lastChapterCount = 0;
+      switchPage('download');
+      updateDownloadUI({ status: 'starting', progress: 0, current_chapter: 0, total_chapters: 0, errors: [] });
+      startPolling(taskId);
+    })
+    .catch(function(err) {
+      showToast('启动下载失败: ' + err.message, 'error');
+    });
+  }
+
+  function startPolling(taskId) {
+    stopPolling();
+    pollTimer = setInterval(function() {
+      fetch('/api/progress/' + taskId)
+        .then(function(r) { return r.json(); })
+        .then(function(data) { updateDownloadUI(data); })
+        .catch(function() {});
+    }, 1000);
+  }
+
+  function stopPolling() {
+    if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+  }
+
+  function updateDownloadUI(data) {
+    downloadEmpty.classList.remove('active');
+    downloadCard.classList.add('active');
+
+    var bookName = sessionStorage.getItem('dl_book_name') || '未知书名';
+    dlBookName.textContent = bookName;
+
+    var pct = data.progress || 0;
+    progressFill.style.width = pct + '%';
+    progressPct.textContent = Math.round(pct) + '%';
+
+    var cur = data.current_chapter || 0;
+    var total = data.total_chapters || 0;
+    if (total > 0) {
+      progressChapter.textContent = '第 ' + cur + '/' + total + ' 章';
+    } else {
+      progressChapter.textContent = cur > 0 ? '已下载 ' + cur + ' 章' : '准备中...';
+    }
+
+    var elapsed = (Date.now() - downloadStartTime) / 1000;
+    if (cur > 0 && elapsed > 1) {
+      var speed = cur / elapsed;
+      dlSpeed.textContent = speed.toFixed(1) + ' 章/秒';
+    } else {
+      dlSpeed.textContent = '—';
+    }
+
+    if (total > 0 && cur > 0 && cur < total) {
+      var remaining = (total - cur) / (cur / elapsed);
+      dlEta.textContent = formatTime(remaining);
+    } else if (cur >= total && total > 0) {
+      dlEta.textContent = '已完成';
+    } else {
+      dlEta.textContent = '—';
+    }
+
+    var statusMap = {
+      'starting': '正在初始化...',
+      'downloading': '下载中...',
+      'building': '正在生成 EPUB...',
+      'completed': '✅ 下载完成',
+      'failed': '❌ 下载失败',
+      'cancelled': '已取消'
+    };
+    dlStatus.textContent = statusMap[data.status] || data.status || '—';
+
+    if (data.status === 'completed') {
+      stopPolling();
+      sessionStorage.removeItem('task_id');
+      sessionStorage.removeItem('dl_book_name');
+      downloadStartTime = 0;
+      showToast('《' + bookName + '》下载完成！', 'success');
+    }
+
+    if (data.status === 'failed') {
+      stopPolling();
+      sessionStorage.removeItem('task_id');
+      sessionStorage.removeItem('dl_book_name');
+      showToast('下载失败，请重试', 'error');
+    }
+
+    var errors = data.errors || [];
+    if (errors.length > 0) {
+      alertsSection.style.display = 'block';
+      alertsList.innerHTML = errors.map(function(e) {
+        return '<div class="alert-item">' +
+          '<span class="alert-icon">⚠️</span>' +
+          '<div class="alert-content">' +
+          '<div class="alert-type">' + escapeHtml(e.type || '警告') + '</div>' +
+          '<div class="alert-message">' + escapeHtml(e.message || e) + '</div>' +
+          '</div></div>';
+      }).join('');
+      alertCount = errors.length;
+      updateBadges();
+    }
+  }
+
+  function restoreDownloadState() {
+    var taskId = sessionStorage.getItem('task_id');
+    if (taskId) {
+      downloadEmpty.classList.remove('active');
+      downloadCard.classList.add('active');
+      var bookName = sessionStorage.getItem('dl_book_name') || '';
+      dlBookName.textContent = bookName || '—';
+      if (!downloadStartTime) downloadStartTime = Date.now();
+      startPolling(taskId);
+    } else {
+      downloadCard.classList.remove('active');
+      downloadEmpty.classList.add('active');
+    }
+  }
+
+  /* ── Alerts ── */
+
+  function updateBadges() {
+    if (alertCount > 0) {
+      navBadge.textContent = alertCount > 99 ? '99+' : alertCount;
+      navBadge.classList.add('visible');
+      alertBadge.textContent = alertCount > 99 ? '99+' : alertCount;
+      alertBadge.classList.add('visible');
+    } else {
+      navBadge.classList.remove('visible');
+      alertBadge.classList.remove('visible');
+    }
+  }
+
+  /* ── History ── */
+
+  function loadHistory() {
+    fetch('/api/history')
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        var books = data.books || [];
+        if (!books.length) {
+          historyEmpty.classList.add('active');
+          historyList.innerHTML = '';
+          return;
+        }
+        historyEmpty.classList.remove('active');
+        var html = '';
+        books.forEach(function(b) {
+          html += '<div class="history-item">';
+          html += '<div class="history-cover">📖</div>';
+          html += '<div class="history-info">';
+          html += '<div class="history-title">' + escapeHtml(b.title) + '</div>';
+          html += '<div class="history-author">' + escapeHtml(b.author || '未知作者') + '</div>';
+          html += '<div class="history-meta">';
+          html += '<span>' + formatFileSize(b.size_mb) + '</span>';
+          if (b.downloaded_at) html += '<span>' + timeAgo(b.downloaded_at) + '</span>';
+          html += '</div></div></div>';
+        });
+        historyList.innerHTML = html;
+      })
+      .catch(function() {
+        historyEmpty.classList.add('active');
+        historyList.innerHTML = '';
+      });
+  }
+
+  /* ── Helpers ── */
+
+  function escapeHtml(str) {
+    if (!str) return '';
+    var div = document.createElement('div');
+    div.appendChild(document.createTextNode(str));
+    return div.innerHTML;
+  }
+
+  /* ── Event Listeners ── */
+
+  searchBtn.addEventListener('click', doSearch);
+  searchInput.addEventListener('keydown', function(e) {
+    if (e.key === 'Enter') doSearch();
+  });
+
+  $$('.nav-item').forEach(function(item) {
+    item.addEventListener('click', function() {
+      switchPage(item.dataset.page);
+    });
+  });
+
+  $('#modalCancel').addEventListener('click', hideConfirmModal);
+  $('#modalConfirm').addEventListener('click', function() {
+    if (selectedBook) startDownload(selectedBook.book_id);
+  });
+
+  confirmModal.addEventListener('click', function(e) {
+    if (e.target === confirmModal) hideConfirmModal();
+  });
+
+  /* ── Init ── */
+
+  searchInput.focus();
+
+  var savedTaskId = sessionStorage.getItem('task_id');
+  if (savedTaskId) {
+    var savedName = sessionStorage.getItem('dl_book_name') || '';
+    dlBookName.textContent = savedName;
+    downloadStartTime = Date.now();
+    downloadEmpty.classList.remove('active');
+    downloadCard.classList.add('active');
+    startPolling(savedTaskId);
+  }
+})();
+</script>
+
+</body>
+</html>
