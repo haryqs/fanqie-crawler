@@ -13,3 +13,16 @@ env/
 Thumbs.db
 reports/*.json
 _tmp_out/
+
+# Flutter
+fanqie_app/.dart_tool/
+fanqie_app/.packages
+fanqie_app/.flutter-plugins*
+fanqie_app/build/
+fanqie_app/android/.gradle/
+fanqie_app/android/app/build/
+fanqie_app/android/local.properties
+fanqie_app/ios/Pods/
+fanqie_app/ios/.symlinks/
+fanqie_app/windows/flutter/
+fanqie_app/.metadata

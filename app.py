@@ -17,16 +17,32 @@ sys.path.insert(0, str(project_root))
 from flask import (
     Flask, render_template, request, jsonify, send_from_directory,
 )
+from flask_cors import CORS
 
 from crawler import get_crawler, DEFAULT_SAVE_DIR
 from report_manager import list_reports, count_unresolved, resolve_report, clear_resolved
 
 app = Flask(__name__, template_folder=str(project_root / "templates"), static_folder=str(project_root / "static"))
+CORS(app)
 
 
 @app.route("/")
 def index():
     return render_template("index.html")
+
+
+@app.route("/api/health", methods=["GET"])
+def api_health():
+    return jsonify({
+        "status": "ok",
+        "version": "1.0.0",
+        "endpoints": {
+            "search": "POST /api/search",
+            "download": "POST /api/download",
+            "progress": "GET /api/progress/<task_id>",
+            "history": "GET /api/history",
+        },
+    })
 
 
 @app.route("/api/search", methods=["POST"])
@@ -137,15 +153,17 @@ def api_open_folder():
 
 def main():
     port = 5000
-    host = "127.0.0.1"
+    host = "0.0.0.0"
+    local_ip = "127.0.0.1"
 
     print(f"\n{'='*50}")
     print(f"  📚 番茄小说下载器")
-    print(f"  服务地址: http://{host}:{port}")
+    print(f"  本地访问: http://{local_ip}:{port}")
+    print(f"  局域网访问: http://<本机IP>:{port}")
     print(f"  按 Ctrl+C 停止服务")
     print(f"{'='*50}\n")
 
-    webbrowser.open(f"http://{host}:{port}")
+    webbrowser.open(f"http://{local_ip}:{port}")
 
     app.run(host=host, port=port, debug=False, threaded=True)
 
