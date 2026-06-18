@@ -24,6 +24,7 @@ MAX_WORKERS = 8
 SEARCH_API = "https://fanqienovel.com/api/author/search/search_book/v1"
 DIRECTORY_API = "https://fanqienovel.com/api/reader/directory/detail"
 CHAPTER_API = "https://fanqienovel.com/api/reader/full"
+CHAPTER_API_MOBILE = "https://novel.snssdk.com/api/novel/book/reader/full/v1"
 PAGE_URL = "https://fanqienovel.com/page/{book_id}"
 
 USER_AGENTS = [
@@ -79,12 +80,20 @@ class FanqieCrawler:
             "Cookie": self._cookie,
         }
 
-    def _request(self, url: str, params: dict = None) -> requests.Response:
+    def _get_mobile_headers(self) -> dict:
+        return {
+            "User-Agent": random.choice(USER_AGENTS),
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "zh-CN,zh;q=0.9",
+            "Referer": "https://novel.snssdk.com/",
+        }
+
+    def _request(self, url: str, params: dict = None, headers: dict = None) -> requests.Response:
         last_error = None
         for attempt in range(MAX_RETRIES):
             try:
                 time.sleep(BASE_DELAY + random.uniform(0, 0.5))
-                resp = self._session.get(url, params=params, headers=self._get_headers(), timeout=15)
+                resp = self._session.get(url, params=params, headers=headers or self._get_headers(), timeout=15)
 
                 if resp.status_code == 429:
                     wait = (2 ** attempt) + random.uniform(0, 1)
@@ -236,29 +245,44 @@ class FanqieCrawler:
         return '\n'.join(lines)
 
     def _fetch_chapter(self, item_id: str) -> Optional[str]:
-        params = {"itemId": item_id}
+        # 使用移动端 API (novel.snssdk.com) — 免费，无需会员
+        params = {
+            "device_platform": "android",
+            "parent_enterfrom": "novel_channel_search.tab.",
+            "aid": "2329",
+            "platform_id": "1",
+            "group_id": item_id,
+            "item_id": item_id,
+        }
         last_error = None
         for attempt in range(MAX_RETRIES):
             try:
                 time.sleep(BASE_DELAY + random.uniform(0, 0.3))
-                resp = self._request(CHAPTER_API, params=params)
+                resp = self._request(CHAPTER_API_MOBILE, params=params,
+                                     headers=self._get_mobile_headers())
                 data = resp.json()
 
                 if data.get("code") != 0:
                     msg = data.get("message", "unknown")
                     logger.warning(f"Chapter API error for {item_id}: {msg}")
                     if attempt < MAX_RETRIES - 1:
-                        self._cookie = self._generate_cookie()
                         time.sleep(1 + attempt)
                         continue
                     return None
 
-                raw_content = data.get("data", {}).get("chapterData", {}).get("content", "")
+                raw_content = data.get("data", {}).get("content", "")
                 if not raw_content:
                     return ""
 
-                decoded = self._decode_content(raw_content)
-                return self._clean_content(decoded)
+                # 移动端返回 HTML 格式：<article>...<p>段落</p>...</article>
+                article_match = re.search(
+                    r'<article>([\s\S]*?)</article>', raw_content)
+                if article_match:
+                    raw_content = article_match.group(1)
+                # <p> 标签 → 换行以保留段落结构
+                raw_content = re.sub(r'<p\b[^>]*>', '\n', raw_content)
+
+                return self._clean_content(raw_content)
 
             except Exception as e:
                 last_error = e
