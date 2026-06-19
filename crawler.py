@@ -5,11 +5,13 @@ import random
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from io import BytesIO
 from pathlib import Path
 from typing import Optional
 
 import requests
 from bs4 import BeautifulSoup
+from fontTools.ttLib import TTFont
 
 from epub_builder import EpubBuilder
 from report_manager import create_report, ReportType, ReportLevel
@@ -26,6 +28,7 @@ DIRECTORY_API = "https://fanqienovel.com/api/reader/directory/detail"
 CHAPTER_API = "https://fanqienovel.com/api/reader/full"
 CHAPTER_API_MOBILE = "https://novel.snssdk.com/api/novel/book/reader/full/v1"
 PAGE_URL = "https://fanqienovel.com/page/{book_id}"
+READER_URL = "https://fanqienovel.com/reader/{item_id}"
 
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -65,6 +68,8 @@ class FanqieCrawler:
         self._cookie = self._generate_cookie()
         self._epub_builder = EpubBuilder()
         self._tasks: dict[str, CrawlerTask] = {}
+        self._font_variant_cache: dict[str, Optional[int]] = {}
+        self._chapter_title_cache: dict[str, str] = {}
 
     def _generate_cookie(self) -> str:
         base = 1000000000000000000
@@ -156,7 +161,16 @@ class FanqieCrawler:
             "query_word": keyword,
         }
         resp = self._request(SEARCH_API, params=params)
+        if not resp.content:
+            create_report(
+                ReportType.API_CHANGED,
+                "搜索 API 返回空响应，可能需要浏览器安全校验",
+                level=ReportLevel.ERROR,
+                context={"keyword": keyword, "url": resp.url},
+            )
+            raise RuntimeError("Search API returned an empty response; Fanqie may require browser verification.")
         data = resp.json()
+        font_variant = self._font_variant_from_response(resp)
 
         if data.get("code") != 0:
             create_report(
@@ -172,12 +186,12 @@ class FanqieCrawler:
         for b in book_list:
             results.append({
                 "book_id": str(b.get("book_id", "")),
-                "book_name": b.get("book_name", "未知"),
-                "author": b.get("author", "未知"),
+                "book_name": self._decode_book_field(b.get("book_name", "未知"), font_variant),
+                "author": self._decode_book_field(b.get("author", "未知"), font_variant),
                 "word_count": b.get("word_number", 0),
                 "status": {0: "已完结", 1: "连载中"}.get(b.get("creation_status"), "未知"),
-                "category": b.get("category", ""),
-                "abstract": b.get("abstract", ""),
+                "category": self._decode_book_field(b.get("category", ""), font_variant),
+                "abstract": self._decode_book_field(b.get("abstract") or b.get("book_abstract", ""), font_variant),
                 "thumb_url": b.get("thumb_url", ""),
             })
 
@@ -217,19 +231,117 @@ class FanqieCrawler:
             })
         return chapters
 
-    def _decode_content(self, raw_content: str) -> str:
+    def _font_variant_from_filename(self, filename: str) -> Optional[int]:
+        filename = filename.split("/")[-1].split(".")[0]
+        filename = re.sub(r"-(?:500|700)$", "", filename)
+        if filename in self._font_variant_cache:
+            return self._font_variant_cache[filename]
+
+        variant = None
+        for host in ("lf6-awef.bytetos.com", "lf3-awef.bytetos.com"):
+            url = f"https://{host}/obj/awesome-font/c/{filename}.woff2"
+            try:
+                resp = self._session.get(url, headers=self._get_headers(), timeout=10)
+                if resp.status_code != 200 or not resp.content:
+                    continue
+                font = TTFont(BytesIO(resp.content))
+                codepoints = []
+                for table in font["cmap"].tables:
+                    codepoints.extend(table.cmap.keys())
+                if codepoints:
+                    min_code = min(codepoints)
+                    if min_code == CODE_MAP[0][0]:
+                        variant = 0
+                    elif min_code == CODE_MAP[1][0]:
+                        variant = 1
+                    else:
+                        # Font downloaded successfully but its codepoint base
+                        # matches no known variant -> Fanqie likely rotated to a
+                        # NEW obfuscation font. Surface this as an actionable
+                        # report; leave variant as None so content is not
+                        # mis-decoded by _decode_content.
+                        create_report(
+                            ReportType.API_CHANGED,
+                            "检测到未知字体混淆变体，可能需要更新 CODE_MAP/CHARSET 映射表",
+                            level=ReportLevel.ERROR,
+                            context={
+                                "font": filename,
+                                "min_codepoint": min_code,
+                                "known_bases": [m[0] for m in CODE_MAP],
+                                "codepoint_count": len(codepoints),
+                            },
+                        )
+                break
+            except Exception:
+                continue
+
+        self._font_variant_cache[filename] = variant
+        return variant
+
+    def _font_variant_from_text(self, text: str) -> Optional[int]:
+        match = re.search(r"awesome-font/c/([A-Za-z0-9_-]+)\.(?:woff2|woff|otf)", text or "")
+        if match:
+            return self._font_variant_from_filename(match.group(1))
+        return None
+
+    def _font_variant_from_response(self, resp: requests.Response) -> Optional[int]:
+        font_config = resp.headers.get("x-tt-zhal") or resp.headers.get("X-Tt-Zhal")
+        if not font_config:
+            return None
+        match = re.search(r"(?:^|;)f=([^;]+)", font_config)
+        if match:
+            return self._font_variant_from_filename(match.group(1))
+        return None
+
+    # Full span of obfuscated codepoints across all known variants. Used to
+    # detect whether content is in the obfuscated range even when the specific
+    # font variant could not be determined.
+    OBFUSCATED_MIN = min(m[0] for m in CODE_MAP)
+    OBFUSCATED_MAX = max(m[1] for m in CODE_MAP)
+
+    def _decode_content(self, raw_content: str, variant: Optional[int] = None) -> str:
+        if not raw_content:
+            return raw_content
+
+        if variant is None or not (0 <= variant < len(CODE_MAP)):
+            # Variant unknown / out of range. Defaulting to a guessed variant
+            # would silently produce GARBLED text for obfuscated content, which
+            # is worse than leaving it untouched. Detect whether the content
+            # actually lives in the obfuscated codepoint range; if so, report
+            # loudly and return the text UNTOUCHED rather than mis-decoding.
+            obfuscated_chars = sum(
+                1 for ch in raw_content
+                if self.OBFUSCATED_MIN <= ord(ch) <= self.OBFUSCATED_MAX
+            )
+            if obfuscated_chars:
+                create_report(
+                    ReportType.CONTENT_DECRYPT,
+                    "无法确定字体混淆变体，内容含混淆字符但未解码（避免产生乱码）",
+                    level=ReportLevel.ERROR,
+                    context={
+                        "variant": variant,
+                        "obfuscated_char_count": obfuscated_chars,
+                        "sample": raw_content[:80],
+                    },
+                )
+            return raw_content
+
+        code_map = CODE_MAP[variant]
+        charset = CHARSET[variant]
         buffer = []
         for ch in raw_content:
             code = ord(ch)
-            if CODE_MAP[0][0] <= code <= CODE_MAP[0][1]:
-                offset = code - CODE_MAP[0][0]
-                buffer.append(CHARSET[0][offset] if offset < len(CHARSET[0]) else ch)
-            elif CODE_MAP[1][0] <= code <= CODE_MAP[1][1]:
-                offset = code - CODE_MAP[1][0]
-                buffer.append(CHARSET[1][offset] if offset < len(CHARSET[1]) else ch)
+            if code_map[0] <= code <= code_map[1]:
+                offset = code - code_map[0]
+                buffer.append(charset[offset] if offset < len(charset) else ch)
             else:
                 buffer.append(ch)
         return "".join(buffer)
+
+    def _decode_book_field(self, value, variant: Optional[int]):
+        if isinstance(value, str) and variant is not None:
+            return self._decode_content(value, variant)
+        return value
 
     def _clean_content(self, text: str) -> str:
         text = re.sub(r'<[^>]+>', '', text)
@@ -243,6 +355,65 @@ class FanqieCrawler:
         if lines and not lines[0].startswith('\u3000'):
             lines[0] = '\u3000\u3000' + lines[0]
         return '\n'.join(lines)
+
+    def _extract_reader_state(self, html_text: str) -> Optional[dict]:
+        marker = "window.__INITIAL_STATE__="
+        start = html_text.find(marker)
+        if start < 0:
+            return None
+        start = html_text.find("{", start + len(marker))
+        if start < 0:
+            return None
+
+        depth = 0
+        in_string = False
+        escape = False
+        end = None
+        for idx in range(start, len(html_text)):
+            ch = html_text[idx]
+            if in_string:
+                if escape:
+                    escape = False
+                elif ch == "\\":
+                    escape = True
+                elif ch == '"':
+                    in_string = False
+                continue
+
+            if ch == '"':
+                in_string = True
+            elif ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    end = idx + 1
+                    break
+
+        if end is None:
+            return None
+
+        state_text = re.sub(r":undefined(?=[,}])", ":null", html_text[start:end])
+        try:
+            return json.loads(state_text)
+        except json.JSONDecodeError:
+            return None
+
+    def _fetch_chapter_from_web(self, item_id: str) -> Optional[str]:
+        resp = self._request(READER_URL.format(item_id=item_id), headers=self._get_headers())
+        html_text = resp.text
+        state = self._extract_reader_state(html_text)
+        chapter_data = (state or {}).get("reader", {}).get("chapterData", {})
+        raw_content = chapter_data.get("content", "")
+        if not raw_content:
+            return None
+        if chapter_data.get("title"):
+            self._chapter_title_cache[item_id] = chapter_data["title"]
+
+        font_variant = self._font_variant_from_text(html_text)
+        decoded = self._decode_content(raw_content, font_variant)
+        decoded = re.sub(r'<p\b[^>]*>', '\n', decoded)
+        return self._clean_content(decoded)
 
     def _fetch_chapter(self, item_id: str) -> Optional[str]:
         # 使用移动端 API (novel.snssdk.com) — 免费，无需会员
@@ -260,7 +431,12 @@ class FanqieCrawler:
                 time.sleep(BASE_DELAY + random.uniform(0, 0.3))
                 resp = self._request(CHAPTER_API_MOBILE, params=params,
                                      headers=self._get_mobile_headers())
-                data = resp.json()
+                if not resp.content:
+                    return self._fetch_chapter_from_web(item_id)
+                try:
+                    data = resp.json()
+                except ValueError:
+                    return self._fetch_chapter_from_web(item_id)
 
                 if data.get("code") != 0:
                     msg = data.get("message", "unknown")
@@ -272,7 +448,7 @@ class FanqieCrawler:
 
                 raw_content = data.get("data", {}).get("content", "")
                 if not raw_content:
-                    return ""
+                    return self._fetch_chapter_from_web(item_id)
 
                 # 移动端返回 HTML 格式：<article>...<p>段落</p>...</article>
                 article_match = re.search(
@@ -282,13 +458,19 @@ class FanqieCrawler:
                 # <p> 标签 → 换行以保留段落结构
                 raw_content = re.sub(r'<p\b[^>]*>', '\n', raw_content)
 
-                return self._clean_content(raw_content)
+                font_variant = self._font_variant_from_response(resp)
+                decoded = self._decode_content(raw_content, font_variant)
+                return self._clean_content(decoded)
 
             except Exception as e:
                 last_error = e
                 if attempt < MAX_RETRIES - 1:
                     time.sleep(1 + attempt)
                     continue
+
+        fallback = self._fetch_chapter_from_web(item_id)
+        if fallback:
+            return fallback
 
         create_report(
             ReportType.CHAPTER_MISSING,
@@ -344,7 +526,8 @@ class FanqieCrawler:
                     try:
                         content = future.result()
                         if content:
-                            ordered[ch["index"]] = (ch["title"], content)
+                            title = self._chapter_title_cache.get(ch["item_id"], ch["title"])
+                            ordered[ch["index"]] = (title, content)
                         else:
                             failed_titles.append(ch["title"])
                             task.failed += 1
