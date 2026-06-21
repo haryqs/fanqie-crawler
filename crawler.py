@@ -1,13 +1,17 @@
 import json
 import logging
 import os
+import queue
 import random
 import re
+import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from io import BytesIO
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlencode
 
 import requests
 from bs4 import BeautifulSoup
@@ -70,11 +74,151 @@ class FanqieCrawler:
         self._tasks: dict[str, CrawlerTask] = {}
         self._font_variant_cache: dict[str, Optional[int]] = {}
         self._chapter_title_cache: dict[str, str] = {}
+        self._browser_queue: Optional[queue.Queue] = None
+        self._browser_ready = threading.Event()
+        self._browser_error = None
+        self._browser_thread: Optional[threading.Thread] = None
+
+    def _ensure_browser_worker(self, timeout: int = 45) -> None:
+        if self._browser_thread and self._browser_thread.is_alive():
+            if not self._browser_ready.wait(timeout=timeout):
+                raise RuntimeError("Browser failed to initialize within timeout")
+            if self._browser_error:
+                raise RuntimeError(f"Browser not available: {self._browser_error}")
+            return
+
+        self._browser_queue = queue.Queue()
+        self._browser_ready = threading.Event()
+        self._browser_error = None
+        self._browser_thread = threading.Thread(
+            target=self._browser_worker,
+            daemon=True,
+            name="fanqie-browser",
+        )
+        self._browser_thread.start()
+        if not self._browser_ready.wait(timeout=45):
+            raise RuntimeError("Browser failed to initialize within timeout")
+        if self._browser_error:
+            raise RuntimeError(f"Browser not available: {self._browser_error}")
+
+    def _browser_worker(self):
+        """Runs in dedicated thread. All Playwright operations happen here."""
+        try:
+            from playwright.sync_api import sync_playwright
+        except ImportError:
+            self._browser_error = "Playwright not installed."
+            self._browser_ready.set()
+            return
+
+        pw = None
+        browser = None
+        page = None
+        try:
+            pw = sync_playwright().start()
+            browser = pw.chromium.launch(
+                headless=True,
+                args=["--disable-blink-features=AutomationControlled", "--no-sandbox"],
+            )
+            context = browser.new_context(
+                user_agent=random.choice(USER_AGENTS),
+                locale="zh-CN",
+            )
+            page = context.new_page()
+            page.goto("https://fanqienovel.com/", wait_until="domcontentloaded", timeout=30000)
+            page.wait_for_timeout(3000)
+            logger.info("Browser worker ready")
+            self._browser_ready.set()
+
+            # Process API call requests
+            while True:
+                try:
+                    task = self._browser_queue.get(timeout=5)
+                    if task is None:  # Shutdown signal
+                        break
+                    req_id, url, params, result_queue = task
+                    try:
+                        full_url = url
+                        if params:
+                            full_url = url + "?" + urlencode(params, safe="%")
+                        full_url_escaped = full_url.replace("\\", "\\\\").replace("'", "\\'")
+                        js_code = f"""
+                        async () => {{
+                            const resp = await fetch('{full_url_escaped}', {{
+                                headers: {{'Accept': 'application/json'}},
+                                credentials: 'include',
+                            }});
+                            if (!resp.ok) {{
+                                throw new Error('HTTP ' + resp.status);
+                            }}
+                            const text = await resp.text();
+                            const headers = {{
+                                'x-tt-zhal': resp.headers.get('x-tt-zhal') || '',
+                            }};
+                            let body;
+                            try {{
+                                body = JSON.parse(text);
+                            }} catch(e) {{
+                                body = {{_raw: text, _error: 'JSON parse failed'}};
+                            }}
+                            return {{body, headers}};
+                        }}
+                        """
+                        result = page.evaluate(js_code)
+                        result_queue.put((req_id, result, None))
+                    except Exception as e:
+                        result_queue.put((req_id, None, str(e)))
+                except queue.Empty:
+                    continue
+        except Exception as e:
+            logger.error(f"Browser worker error: {e}")
+            self._browser_error = str(e)
+            self._browser_ready.set()
+        finally:
+            if page:
+                try:
+                    page.close()
+                except Exception:
+                    pass
+            if browser:
+                try:
+                    browser.close()
+                except Exception:
+                    pass
+            if pw:
+                try:
+                    pw.stop()
+                except Exception:
+                    pass
+
+    def _browser_fetch(self, url: str, params: dict = None, include_headers: bool = False):
+        """Send API call to browser worker thread (handles msToken/a_bogus automatically)."""
+        self._ensure_browser_worker()
+
+        req_id = f"req_{int(time.time() * 1000)}_{random.randint(0, 9999)}"
+        result_queue = queue.Queue()
+        if self._browser_queue is None:
+            raise RuntimeError("Browser worker queue is not initialized")
+        self._browser_queue.put((req_id, url, params or {}, result_queue))
+        try:
+            _, result, error = result_queue.get(timeout=30)
+        except queue.Empty:
+            raise RuntimeError("Browser request timed out after 30s")
+        if error:
+            raise RuntimeError(f"Browser fetch error: {error}")
+        if include_headers:
+            return result.get("body", result), result.get("headers", {})
+        return result.get("body", result)
 
     def _generate_cookie(self) -> str:
         base = 1000000000000000000
         web_id = random.randint(base * 6, base * 9)
         return f"novel_web_id={web_id}"
+
+    @staticmethod
+    def _generate_ms_token(length: int = 107) -> str:
+        """Generate a random msToken (simulated client token for rate-limiting)."""
+        base_str = "ABCDEFGHIGKLMNOPQRSTUVWXYZabcdefghigklmnopqrstuvwxyz0123456789="
+        return "".join(random.choice(base_str) for _ in range(length))
 
     def _get_headers(self) -> dict:
         return {
@@ -94,6 +238,11 @@ class FanqieCrawler:
         }
 
     def _request(self, url: str, params: dict = None, headers: dict = None) -> requests.Response:
+        if params is None:
+            params = {}
+        # Auto-add msToken for fanqienovel.com APIs that require anti-crawling signatures
+        if "fanqienovel.com" in url and "msToken" not in params:
+            params["msToken"] = self._generate_ms_token()
         last_error = None
         for attempt in range(MAX_RETRIES):
             try:
@@ -160,17 +309,27 @@ class FanqieCrawler:
             "query_type": "0",
             "query_word": keyword,
         }
-        resp = self._request(SEARCH_API, params=params)
-        if not resp.content:
-            create_report(
-                ReportType.API_CHANGED,
-                "搜索 API 返回空响应，可能需要浏览器安全校验",
-                level=ReportLevel.ERROR,
-                context={"keyword": keyword, "url": resp.url},
-            )
-            raise RuntimeError("Search API returned an empty response; Fanqie may require browser verification.")
-        data = resp.json()
-        font_variant = self._font_variant_from_response(resp)
+        font_variant = None
+        # Use browser fetch to auto-handle msToken/a_bogus signatures
+        try:
+            data, headers = self._browser_fetch(SEARCH_API, params=params, include_headers=True)
+            font_variant = self._font_variant_from_config(headers.get("x-tt-zhal", ""))
+        except Exception as e:
+            logger.warning(f"Browser fetch failed, falling back to requests: {e}")
+            resp = self._request(SEARCH_API, params=params)
+            if not resp.content:
+                create_report(
+                    ReportType.API_CHANGED,
+                    "搜索 API 返回空响应，可能需要浏览器安全校验",
+                    level=ReportLevel.ERROR,
+                    context={"keyword": keyword, "url": resp.url},
+                )
+                raise RuntimeError("Search API returned an empty response; Fanqie may require browser verification.")
+            data = resp.json()
+            font_variant = self._font_variant_from_response(resp)
+
+        if data.get("_error"):
+            raise RuntimeError(f"Search API error: {data}")
 
         if data.get("code") != 0:
             create_report(
@@ -184,14 +343,20 @@ class FanqieCrawler:
         book_list = data.get("data", {}).get("search_book_data_list", [])
         results = []
         for b in book_list:
+            # Decode encrypted font-mapped text in API response
+            raw_name = b.get("book_name", "未知")
+            raw_author = b.get("author", "未知")
+            raw_abstract = b.get("abstract", "")
+            raw_book_abstract = b.get("book_abstract", "")
+            abstract_text = raw_book_abstract or raw_abstract
             results.append({
                 "book_id": str(b.get("book_id", "")),
-                "book_name": self._decode_book_field(b.get("book_name", "未知"), font_variant),
-                "author": self._decode_book_field(b.get("author", "未知"), font_variant),
+                "book_name": self._decode_book_field(raw_name, font_variant),
+                "author": self._decode_book_field(raw_author, font_variant),
                 "word_count": b.get("word_number", 0),
                 "status": {0: "已完结", 1: "连载中"}.get(b.get("creation_status"), "未知"),
                 "category": self._decode_book_field(b.get("category", ""), font_variant),
-                "abstract": self._decode_book_field(b.get("abstract") or b.get("book_abstract", ""), font_variant),
+                "abstract": self._decode_book_field(abstract_text, font_variant),
                 "thumb_url": b.get("thumb_url", ""),
             })
 
@@ -200,8 +365,12 @@ class FanqieCrawler:
     def _get_chapter_list(self, book_id: str) -> list[dict]:
         logger.info("Fetching chapter list...")
         params = {"bookId": book_id}
-        resp = self._request(DIRECTORY_API, params=params)
-        data = resp.json()
+        try:
+            data = self._browser_fetch(DIRECTORY_API, params=params)
+        except Exception as e:
+            logger.warning(f"Browser fetch failed for directory, falling back: {e}")
+            resp = self._request(DIRECTORY_API, params=params)
+            data = resp.json()
 
         if data.get("code") != 0:
             create_report(
@@ -284,14 +453,17 @@ class FanqieCrawler:
             return self._font_variant_from_filename(match.group(1))
         return None
 
-    def _font_variant_from_response(self, resp: requests.Response) -> Optional[int]:
-        font_config = resp.headers.get("x-tt-zhal") or resp.headers.get("X-Tt-Zhal")
+    def _font_variant_from_config(self, font_config: str) -> Optional[int]:
         if not font_config:
             return None
         match = re.search(r"(?:^|;)f=([^;]+)", font_config)
         if match:
             return self._font_variant_from_filename(match.group(1))
         return None
+
+    def _font_variant_from_response(self, resp: requests.Response) -> Optional[int]:
+        font_config = resp.headers.get("x-tt-zhal") or resp.headers.get("X-Tt-Zhal")
+        return self._font_variant_from_config(font_config)
 
     # Full span of obfuscated codepoints across all known variants. Used to
     # detect whether content is in the obfuscated range even when the specific
@@ -342,6 +514,17 @@ class FanqieCrawler:
         if isinstance(value, str) and variant is not None:
             return self._decode_content(value, variant)
         return value
+
+    def _decode_safe(self, text: str, variant: Optional[int] = None) -> str:
+        """Decode text only if it contains PUA-encoded characters (code points 58344-58716).
+        Otherwise return as-is to avoid corrupting already-decoded text."""
+        if not text:
+            return text
+        for ch in text:
+            code = ord(ch)
+            if (CODE_MAP[0][0] <= code <= CODE_MAP[0][1]) or (CODE_MAP[1][0] <= code <= CODE_MAP[1][1]):
+                return self._decode_content(text, variant)
+        return text
 
     def _clean_content(self, text: str) -> str:
         text = re.sub(r'<[^>]+>', '', text)
@@ -416,7 +599,7 @@ class FanqieCrawler:
         return self._clean_content(decoded)
 
     def _fetch_chapter(self, item_id: str) -> Optional[str]:
-        # 使用移动端 API (novel.snssdk.com) — 免费，无需会员
+        # Use browser fetch to auto-handle API signatures
         params = {
             "device_platform": "android",
             "parent_enterfrom": "novel_channel_search.tab.",
@@ -429,6 +612,7 @@ class FanqieCrawler:
         for attempt in range(MAX_RETRIES):
             try:
                 time.sleep(BASE_DELAY + random.uniform(0, 0.3))
+                # Mobile API on snssdk.com — use direct requests (no msToken needed)
                 resp = self._request(CHAPTER_API_MOBILE, params=params,
                                      headers=self._get_mobile_headers())
                 if not resp.content:
@@ -488,8 +672,11 @@ class FanqieCrawler:
             params = {"item_ids": ",".join(ids)}
             try:
                 time.sleep(BASE_DELAY + random.uniform(0, 0.3))
-                resp = self._request(CHAPTER_API, params=params)
-                data = resp.json()
+                try:
+                    data = self._browser_fetch(CHAPTER_API, params=params)
+                except Exception:
+                    resp = self._request(CHAPTER_API, params=params)
+                    data = resp.json()
                 results = data.get("data", {})
                 if isinstance(results, dict):
                     for ch in batch:
