@@ -5,14 +5,14 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
-<title>番茄小说下载器</title>
+<title>小说资源下载器</title>
 <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
 
 <div class="app">
   <header class="header">
-    <span class="header-title" id="headerTitle">📚 番茄小说下载器</span>
+    <span class="header-title" id="headerTitle">📚 小说资源下载器</span>
     <span class="header-badge" id="alertBadge">0</span>
   </header>
 
@@ -22,8 +22,13 @@
     <div class="page active" id="searchView">
       <div class="search-hero" id="searchHero">
         <div class="search-icon">📖</div>
-        <div class="search-title">番茄小说下载器</div>
-        <div class="search-subtitle">搜索你想下载的小说</div>
+        <div class="search-title">小说资源下载器</div>
+        <div class="search-subtitle">选择来源后搜索，或粘贴公开网页 URL</div>
+      </div>
+      <div class="source-picker-wrap">
+        <select class="source-picker" id="sourceSelect" aria-label="选择小说来源">
+          <option value="fanqie">番茄小说</option>
+        </select>
       </div>
       <div class="search-bar-wrap">
         <input type="search" class="search-bar" id="searchInput" placeholder="输入书名或作者..." autocomplete="off" enterkeyhint="search">
@@ -129,6 +134,7 @@
   var $$ = function(s) { return document.querySelectorAll(s); };
 
   var searchInput = $('#searchInput');
+  var sourceSelect = $('#sourceSelect');
   var searchBtn = $('#searchBtn');
   var searchHero = $('#searchHero');
   var searchLoading = $('#searchLoading');
@@ -159,6 +165,7 @@
 
   var currentPage = 'search';
   var selectedBook = null;
+  var sources = [];
   var pollTimer = null;
   var alertCount = 0;
   var downloadStartTime = 0;
@@ -176,8 +183,8 @@
     var navItem = document.querySelector('.nav-item[data-page="' + name + '"]');
     if (navItem) navItem.classList.add('active');
 
-    var titles = { search: '📚 番茄小说下载器', download: '📥 下载进度', history: '📂 下载历史' };
-    headerTitle.textContent = titles[name] || '📚 番茄小说下载器';
+    var titles = { search: '📚 小说资源下载器', download: '📥 下载进度', history: '📂 下载历史' };
+    headerTitle.textContent = titles[name] || '📚 小说资源下载器';
 
     if (name === 'history') loadHistory();
     if (name === 'download') restoreDownloadState();
@@ -243,7 +250,8 @@
 
   function doSearch() {
     var keyword = searchInput.value.trim();
-    if (!keyword) { showToast('请输入书名', 'error'); return; }
+    if (!keyword) { showToast('请输入书名或 URL', 'error'); return; }
+    var sourceId = sourceSelect ? sourceSelect.value : 'fanqie';
 
     searchLoading.classList.add('active');
     searchEmpty.classList.remove('active');
@@ -253,7 +261,7 @@
     fetch('/api/search', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ keyword: keyword })
+      body: JSON.stringify({ keyword: keyword, source_id: sourceId })
     })
     .then(function(r) { return r.json(); })
     .then(function(data) {
@@ -275,11 +283,12 @@
 
   function renderSearchResults(results) {
     var html = '';
-    results.forEach(function(b) {
+    results.forEach(function(b, idx) {
       var statusClass = b.status === '已完结' ? 'finished' : 'ongoing';
-      html += '<div class="result-card" data-book-id="' + b.book_id + '">';
+      html += '<div class="result-card" data-index="' + idx + '">';
       html += '<div class="result-title">' + escapeHtml(b.book_name) + '</div>';
       html += '<div class="result-meta">';
+      if (b.source_name) html += '<span class="result-meta-item result-source">' + escapeHtml(b.source_name) + '</span>';
       html += '<span class="result-meta-item">' + escapeHtml(b.author) + '</span>';
       html += '<span class="result-meta-item">' + formatWordCount(b.word_count) + '</span>';
       if (b.category) html += '<span class="result-meta-item">' + escapeHtml(b.category) + '</span>';
@@ -292,8 +301,7 @@
 
     searchResults.querySelectorAll('.result-card').forEach(function(card) {
       card.addEventListener('click', function() {
-        var bookId = card.dataset.bookId;
-        var book = results.find(function(b) { return b.book_id === bookId; });
+        var book = results[Number(card.dataset.index)];
         if (book) showConfirmModal(book);
       });
     });
@@ -301,19 +309,29 @@
 
   /* ── Download ── */
 
-  function startDownload(bookId) {
+  function startDownload(book) {
+    var downloadBook = book || selectedBook || {};
+    var bookId = downloadBook.book_id || downloadBook.bookId || '';
     hideConfirmModal();
 
     fetch('/api/download', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ book_id: bookId, book_name: selectedBook ? selectedBook.book_name : '未知' })
+      body: JSON.stringify({
+        book_id: bookId,
+        book_name: downloadBook.book_name || downloadBook.bookName || '未知',
+        author: downloadBook.author || '未知',
+        source_id: downloadBook.source_id || (sourceSelect ? sourceSelect.value : 'fanqie'),
+        thumb_url: downloadBook.thumb_url || '',
+        abstract: downloadBook.abstract || ''
+      })
     })
     .then(function(r) { return r.json(); })
     .then(function(data) {
       var taskId = data.task_id;
       sessionStorage.setItem('task_id', taskId);
-      sessionStorage.setItem('dl_book_name', selectedBook ? selectedBook.book_name : '');
+      sessionStorage.setItem('task_source_id', data.source_id || downloadBook.source_id || '');
+      sessionStorage.setItem('dl_book_name', downloadBook.book_name || downloadBook.bookName || data.book_name || '');
       downloadStartTime = Date.now();
       lastChapterCount = 0;
       switchPage('download');
@@ -328,7 +346,9 @@
   function startPolling(taskId) {
     stopPolling();
     pollTimer = setInterval(function() {
-      fetch('/api/progress/' + taskId)
+      var sourceId = sessionStorage.getItem('task_source_id') || '';
+      var suffix = sourceId ? '?source_id=' + encodeURIComponent(sourceId) : '';
+      fetch('/api/progress/' + taskId + suffix)
         .then(function(r) { return r.json(); })
         .then(function(data) { updateDownloadUI(data); })
         .catch(function() {});
@@ -388,6 +408,7 @@
     if (data.status === 'completed') {
       stopPolling();
       sessionStorage.removeItem('task_id');
+      sessionStorage.removeItem('task_source_id');
       sessionStorage.removeItem('dl_book_name');
       downloadStartTime = 0;
       showToast('《' + bookName + '》下载完成！', 'success');
@@ -396,6 +417,7 @@
     if (data.status === 'failed') {
       stopPolling();
       sessionStorage.removeItem('task_id');
+      sessionStorage.removeItem('task_source_id');
       sessionStorage.removeItem('dl_book_name');
       showToast('下载失败，请重试', 'error');
     }
@@ -466,6 +488,7 @@
           html += '<div class="history-title">' + escapeHtml(b.title) + '</div>';
           html += '<div class="history-author">' + escapeHtml(b.author || '未知作者') + '</div>';
           html += '<div class="history-meta">';
+          if (b.source_name) html += '<span>' + escapeHtml(b.source_name) + '</span>';
           html += '<span>' + formatFileSize(b.size_mb) + '</span>';
           if (b.downloaded_at) html += '<span>' + timeAgo(b.downloaded_at) + '</span>';
           html += '</div></div></div>';
@@ -487,12 +510,34 @@
     return div.innerHTML;
   }
 
+  function loadSources() {
+    fetch('/api/sources')
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        sources = data.sources || [];
+        if (!sourceSelect || !sources.length) return;
+        sourceSelect.innerHTML = sources.map(function(src) {
+          return '<option value="' + escapeHtml(src.id) + '">' + escapeHtml(src.name) + '</option>';
+        }).join('');
+        sourceSelect.value = data.default_source || 'fanqie';
+        updateSourcePlaceholder();
+      })
+      .catch(function() {});
+  }
+
+  function updateSourcePlaceholder() {
+    if (!sourceSelect || !sources.length) return;
+    var source = sources.find(function(src) { return src.id === sourceSelect.value; });
+    searchInput.placeholder = source && source.search_placeholder ? source.search_placeholder : '输入书名或 URL...';
+  }
+
   /* ── Event Listeners ── */
 
   searchBtn.addEventListener('click', doSearch);
   searchInput.addEventListener('keydown', function(e) {
     if (e.key === 'Enter') doSearch();
   });
+  sourceSelect.addEventListener('change', updateSourcePlaceholder);
 
   $$('.nav-item').forEach(function(item) {
     item.addEventListener('click', function() {
@@ -502,7 +547,7 @@
 
   $('#modalCancel').addEventListener('click', hideConfirmModal);
   $('#modalConfirm').addEventListener('click', function() {
-    if (selectedBook) startDownload(selectedBook.book_id);
+    if (selectedBook) startDownload(selectedBook);
   });
 
   confirmModal.addEventListener('click', function(e) {
@@ -512,6 +557,7 @@
   /* ── Init ── */
 
   searchInput.focus();
+  loadSources();
 
   var savedTaskId = sessionStorage.getItem('task_id');
   if (savedTaskId) {

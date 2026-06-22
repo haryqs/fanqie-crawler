@@ -22,7 +22,8 @@ from report_manager import create_report, ReportType, ReportLevel
 
 logger = logging.getLogger("fanqie.crawler")
 
-DEFAULT_SAVE_DIR = os.path.expanduser("~/Documents/番茄小说")
+APP_DIR = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
+DEFAULT_SAVE_DIR = APP_DIR / "downloads"
 MAX_RETRIES = 3
 BASE_DELAY = 0.5
 MAX_WORKERS = 8
@@ -764,6 +765,8 @@ class FanqieCrawler:
             json.dump({
                 "title": book_name,
                 "author": author or "未知",
+                "source": "番茄小说",
+                "source_id": "fanqie",
                 "downloaded_at": time.strftime("%Y-%m-%d %H:%M:%S"),
             }, f, ensure_ascii=False)
         return task

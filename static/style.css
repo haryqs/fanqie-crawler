@@ -187,6 +187,29 @@ body {
 
 /* ── Search Bar ── */
 
+.source-picker-wrap {
+  margin: 0 0 10px;
+}
+
+.source-picker {
+  width: 100%;
+  height: 42px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--card);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 14px;
+  padding: 0 12px;
+  outline: none;
+  box-shadow: var(--shadow-sm);
+}
+
+.source-picker:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-glow), var(--shadow-sm);
+}
+
 .search-bar-wrap {
   position: relative;
   margin: 0 0 16px;
@@ -320,6 +343,11 @@ body {
   padding: 3px 8px;
   border-radius: 6px;
   line-height: 1;
+}
+
+.result-source {
+  color: var(--accent-dark);
+  background: var(--accent-glow);
 }
 
 .result-status {
