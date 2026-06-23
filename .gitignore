@@ -13,7 +13,8 @@ env/
 Thumbs.db
 reports/*.json
 _tmp_out/
-downloads/
+downloads/*
+!downloads/.gitkeep
 build/
 dist/
 *.spec
